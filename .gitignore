@@ -1,0 +1,28 @@
+# Large model files (too big for GitHub)
+models/detection_model.pkl
+models/forecasting_model.pkl
+
+# Large data files (too big for GitHub)
+data/detection_prepared.csv
+data/forecasting_prepared.csv
+data/friday.csv
+data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+env/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Results/outputs
+results/
+
+# Logs
+*.log
+backend_test.log
