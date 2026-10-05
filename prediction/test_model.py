@@ -6,7 +6,7 @@ from preprocessing.detection_preprocessor import preprocess_detection_data
 
 MODEL_PATH = "models/detection_model.pkl"
 FEATURE_PATH = "models/detection_features.json"
-DATA_PATH = "data/monday.csv"
+DATA_PATH = "data/detection_prepared.csv"
 
 
 # Preprocess new data
@@ -23,7 +23,7 @@ probabilities = model.predict_proba(X)
 
 
 print("=" * 60)
-print("NEW DATA MODEL TEST - MONDAY.CSV")
+print("NEW DATA MODEL TEST")
 print("=" * 60)
 
 # Show only first 10 flows
