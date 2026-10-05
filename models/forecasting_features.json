@@ -1,0 +1,19 @@
+[
+    "total_flows",
+    "attack_flows",
+    "normal_flows",
+    "avg_packet_rate",
+    "avg_byte_rate",
+    "avg_flow_duration",
+    "syn_count",
+    "rst_count",
+    "unique_src_ip",
+    "unique_dst_ip",
+    "attack_count_lag_1",
+    "attack_count_lag_2",
+    "attack_count_lag_3",
+    "attack_ratio",
+    "rolling_mean_3",
+    "rolling_std_3",
+    "rolling_max_3"
+]
