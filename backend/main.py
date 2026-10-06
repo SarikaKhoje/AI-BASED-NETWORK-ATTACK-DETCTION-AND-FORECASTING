@@ -10,6 +10,7 @@ import pandas as pd
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 
 from backend import model_loader
 from backend.schemas import (
@@ -23,7 +24,11 @@ from backend.detection_api import run_detection
 from backend.forecast_api  import run_forecast, get_all_windows
 from backend.risk_api      import run_risk
 from backend.shap_api      import run_explain
-from backend.live_pipeline import process_csv_bytes, get_live_result
+from backend.live_pipeline import (
+    get_live_explanation,
+    get_live_result,
+    process_csv_bytes,
+)
 
 
 # ── Startup: load models once ──────────────────────────────
@@ -118,19 +123,32 @@ def explain(request: ExplainRequest):
 async def upload_csv(file: UploadFile = File(...)):
     """
     Upload a CICFlowMeter-generated CSV.
-    Runs the full pipeline: Random Forest → Aggregation → Forecast → Risk → SHAP.
-    Dashboard updates automatically after this call.
+    Runs detection, aggregation, forecasting, and risk analysis.
+    SHAP is calculated separately so the main results return sooner.
     """
-    if not file.filename.endswith(".csv"):
+    filename = file.filename or "upload.csv"
+    if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are accepted")
     content = await file.read()
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     try:
-        result = process_csv_bytes(content, file.filename)
+        result = await run_in_threadpool(process_csv_bytes, content, filename)
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ── GET /live-explanation ─────────────────────────────────
+@app.get("/live-explanation")
+def live_explanation():
+    """Calculate the SHAP explanation for the latest uploaded CSV."""
+    try:
+        return get_live_explanation()
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 # ── GET /live-status ───────────────────────────────────────

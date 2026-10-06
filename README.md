@@ -158,9 +158,9 @@ The most important file for live traffic. When a CICFlowMeter CSV is uploaded:
 4. Calculates lag features and rolling statistics
 5. Runs Gradient Boosting on the latest window
 6. Runs the Risk Engine
-7. Runs SHAP on the most recent attack flow
-8. Returns the complete dashboard response
-9. Stores the result so `/live-status` can return it
+7. Returns detection, forecast, risk, and chart results
+8. Stores the result so `/live-status` can return it
+9. Calculates SHAP separately through `/live-explanation` so it does not delay the main results
 
 ### `backend/main.py`
 The FastAPI application. Registers all endpoints, configures CORS for React,
@@ -235,8 +235,9 @@ Blue bars = features pushing toward benign. Sorted by absolute SHAP value.
 | GET | `/forecast` | Predict next 5-min attack count |
 | POST | `/risk` | Calculate risk score and level |
 | POST | `/explain` | SHAP explanation for one flow |
-| POST | `/upload-csv` | Upload CICFlowMeter CSV → full pipeline |
+| POST | `/upload-csv` | Upload CICFlowMeter CSV → detection, forecast, risk, and charts |
 | GET | `/live-status` | Latest result from uploaded CSV |
+| GET | `/live-explanation` | Calculate SHAP explanation for the latest upload |
 | GET | `/dashboard` | Combined response for React dashboard |
 | GET | `/docs` | Swagger UI |
 
@@ -290,7 +291,7 @@ No fake predictions. Clearly labelled: **DEMO MODE — Historical CIC-IDS2017 Tr
 
 ### LIVE MODE
 Upload a CICFlowMeter-generated CSV from real network traffic.
-The full pipeline runs automatically and the dashboard updates.
+Detection, forecast, risk, and charts appear first; the SHAP explanation loads separately.
 Clearly labelled: **LIVE MODE — filename.csv**
 
 ---
@@ -341,11 +342,11 @@ Dashboard updates automatically with real predictions
       ↓
 [Risk Engine] → risk_score, risk_level
       ↓
-[SHAP on latest attack flow] → top 10 contributing features
-      ↓
 [JSON response]
       ↓
-[React Dashboard renders everything]
+[React Dashboard renders detection, forecast, risk, and chart results]
+      ↓
+[GET /live-explanation] → SHAP on latest attack flow → top 10 contributing features
 ```
 
 ---
@@ -358,7 +359,7 @@ Dashboard updates automatically with real predictions
 | `ModuleNotFoundError: fastapi` | Package not installed | `pip install fastapi uvicorn` |
 | Dashboard shows no data | Backend not running | Start backend first, then frontend |
 | Upload fails | Wrong file format | Must be CICFlowMeter `.csv` output |
-| SHAP takes long | First-time explainer build | Wait — it caches after first use |
+| SHAP takes long | Explanation runs separately from upload results | Wait for the SHAP panel; the explainer caches after first use |
 | `503 model not loaded` | Models not found | Run from project root directory |
 
 ---

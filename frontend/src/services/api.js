@@ -3,7 +3,10 @@ const BASE = '/api'
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`)
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail ?? `GET ${path} failed: ${res.status}`)
+  }
   return res.json()
 }
 
@@ -36,5 +39,6 @@ export const api = {
   risk:       (body)  => post('/risk',    body),
   explain:    (feats) => post('/explain', { features: feats }),
   liveStatus: ()      => get('/live-status'),
+  liveExplanation: () => get('/live-explanation'),
   uploadCsv,
 }

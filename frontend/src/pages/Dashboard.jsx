@@ -13,6 +13,8 @@ export default function Dashboard() {
   const [mode, setMode]         = useState('demo')
   const [uploading, setUploading] = useState(false)
   const [uploadMsg, setUploadMsg] = useState(null)
+  const [explanationLoading, setExplanationLoading] = useState(false)
+  const [explanationError, setExplanationError] = useState(null)
   const [dragOver, setDragOver] = useState(false)
   const fileRef = useRef()
 
@@ -21,8 +23,13 @@ export default function Dashboard() {
     setLoading(true)
     setError(null)
     try {
-      const d = await api.dashboard(mode)
-      setData(d)
+      if (mode === 'live') {
+        const status = await api.liveStatus()
+        setData(status.available ? status.data : null)
+      } else {
+        const d = await api.dashboard(mode)
+        setData(d)
+      }
     } catch (e) {
       setError(e.message)
     } finally {
@@ -38,21 +45,29 @@ export default function Dashboard() {
     const id = setInterval(async () => {
       try {
         const s = await api.liveStatus()
-        if (s.available && s.data) setData(s.data)
-      } catch (_) {}
+        if (s.available && s.data) {
+          setData((current) => current?.summary?.filename === s.data.summary?.filename
+            && current?.explanation && !s.data.explanation
+            ? { ...s.data, explanation: current.explanation }
+            : s.data)
+        }
+      } catch (e) {
+        setError(e.message)
+      }
     }, 5000)
     return () => clearInterval(id)
   }, [mode])
 
   // ── Handle CSV upload ──────────────────────────────────
   const handleFile = async (file) => {
-    if (!file) return
-    if (!file.name.endsWith('.csv')) {
+    if (!file || uploading) return
+    if (!file.name.toLowerCase().endsWith('.csv')) {
       setUploadMsg({ ok: false, text: 'Please upload a .csv file (CICFlowMeter output).' })
       return
     }
     setUploading(true)
     setUploadMsg(null)
+    setExplanationError(null)
     try {
       const result = await api.uploadCsv(file)
       setData(result)
@@ -61,6 +76,15 @@ export default function Dashboard() {
         ok: true,
         text: `✓ Processed ${result.summary?.total_flows?.toLocaleString()} flows — ${result.summary?.attack_flows?.toLocaleString()} attacks detected.`,
       })
+      setExplanationLoading(true)
+      api.liveExplanation()
+        .then((explanation) => {
+          setData((current) => current?.summary?.filename === result.summary?.filename
+            ? { ...current, explanation }
+            : current)
+        })
+        .catch((e) => setExplanationError(`SHAP explanation unavailable: ${e.message}`))
+        .finally(() => setExplanationLoading(false))
     } catch (e) {
       setUploadMsg({ ok: false, text: `Upload failed: ${e.message}` })
     } finally {
@@ -68,7 +92,11 @@ export default function Dashboard() {
     }
   }
 
-  const onFileInput  = (e) => handleFile(e.target.files[0])
+  const onFileInput  = (e) => {
+    const file = e.target.files[0]
+    e.target.value = ''
+    handleFile(file)
+  }
   const onDrop       = (e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]) }
   const onDragOver   = (e) => { e.preventDefault(); setDragOver(true) }
   const onDragLeave  = () => setDragOver(false)
@@ -136,7 +164,7 @@ export default function Dashboard() {
         <p className="text-xs text-gray-500 mb-4">
           Capture network traffic with <span className="text-blue-400">Wireshark</span>, convert the PCAP to CSV using{' '}
           <span className="text-blue-400">CICFlowMeter</span>, then upload the CSV here.
-          The full pipeline runs automatically: Random Forest → Forecast → Risk → SHAP.
+          Detection, forecast, and risk results appear first; the SHAP explanation loads separately.
         </p>
 
         {/* Pipeline diagram */}
@@ -151,15 +179,15 @@ export default function Dashboard() {
         {/* Drop zone */}
         <div
           onDrop={onDrop} onDragOver={onDragOver} onDragLeave={onDragLeave}
-          onClick={() => fileRef.current?.click()}
+          onClick={() => !uploading && fileRef.current?.click()}
           className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${
             dragOver ? 'border-blue-500 bg-blue-950/30' : 'border-gray-700 hover:border-gray-500'
           }`}>
-          <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={onFileInput} />
+          <input ref={fileRef} type="file" accept=".csv" className="hidden" disabled={uploading} onChange={onFileInput} />
           {uploading ? (
             <div className="flex flex-col items-center gap-2">
               <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm text-blue-400">Processing through pipeline…</p>
+              <p className="text-sm text-blue-400">Analyzing uploaded flows… Larger files take longer.</p>
             </div>
           ) : (
             <>
@@ -287,6 +315,12 @@ export default function Dashboard() {
           <span className="text-yellow-400">{expl?.prediction ?? '—'}</span>?
           (Red = pushes toward attack · Blue = pushes toward benign)
         </p>
+        {explanationLoading && (
+          <p className="text-xs text-blue-400 mb-3">Traffic results are ready; generating the SHAP explanation…</p>
+        )}
+        {explanationError && (
+          <p className="text-xs text-yellow-400 mb-3">{explanationError}</p>
+        )}
         <SHAPChart features={expl?.top_features} />
       </div>
 

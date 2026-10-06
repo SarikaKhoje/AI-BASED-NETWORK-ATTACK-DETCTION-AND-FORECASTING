@@ -7,7 +7,7 @@ Flow:
     → 5-minute window aggregation
     → Gradient Boosting forecast (next window)
     → Rule-Based Risk Engine
-    → SHAP explanation (on most recent attack flow)
+    → SHAP explanation on demand (on most recent attack flow)
 """
 
 import io
@@ -16,30 +16,43 @@ import pandas as pd
 from datetime import datetime
 
 from backend import model_loader
-from backend.detection_api import _build_feature_df
-from backend.schemas import DetectRequest, RiskRequest
-from backend.detection_api import run_detection
+from backend.schemas import ExplainRequest, RiskRequest
 from backend.risk_api import run_risk
 from backend.shap_api import run_explain
-from backend.schemas import ExplainRequest
 
 
 # ── Shared state: last live result ────────────────────────
 _live_result: dict = None
 _live_updated_at: str = None
+_live_explanation_features: dict = None
+_live_explanation = None
 
 
 def get_live_result():
     return _live_result, _live_updated_at
 
 
+def get_live_explanation():
+    global _live_explanation
+
+    if _live_explanation_features is None:
+        raise ValueError("Upload a CSV before requesting its explanation")
+    if _live_explanation is None:
+        _live_explanation = run_explain(
+            ExplainRequest(features=_live_explanation_features)
+        )
+        if _live_result is not None:
+            _live_result["explanation"] = _live_explanation.model_dump()
+    return _live_explanation
+
+
 def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
     """
-    Full pipeline on an uploaded CICFlowMeter CSV.
-    Returns the same structure as /dashboard so the frontend
-    can update without any changes.
+    Process an uploaded CICFlowMeter CSV and return dashboard results.
+    SHAP is calculated separately so the main results are available sooner.
     """
     global _live_result, _live_updated_at
+    global _live_explanation_features, _live_explanation
 
     detection_model  = model_loader.detection_model
     forecast_model   = model_loader.forecast_model
@@ -66,6 +79,8 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
             df["Timestamp"], errors="coerce"
         )
         df = df.dropna(subset=["parsed_datetime"])
+        if df.empty:
+            raise ValueError("No rows contain a valid timestamp")
     else:
         # Assign synthetic timestamps starting from now
         base = pd.Timestamp.now().floor("5min")
@@ -76,7 +91,6 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
     df = df.sort_values("parsed_datetime").reset_index(drop=True)
 
     # ── 4. Build detection feature matrix ─────────────────
-    X_rows = []
     for feat in detection_features:
         if feat not in df.columns:
             df[feat] = 0.0
@@ -86,8 +100,8 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
     X = df[detection_features].fillna(0)
 
     # ── 5. Run Random Forest on every flow ────────────────
-    predictions   = detection_model.predict(X)
     probabilities = detection_model.predict_proba(X)
+    predictions   = detection_model.classes_[probabilities.argmax(axis=1)]
     confidences   = probabilities.max(axis=1)
 
     df["rf_prediction"] = predictions
@@ -112,16 +126,6 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
 
     # ── 7. 5-minute window aggregation ────────────────────
     df["time_window"] = df["parsed_datetime"].dt.floor("5min")
-
-    agg_cols = {
-        "total_flows":        ("parsed_datetime", "count"),
-        "attack_flows":       ("is_attack",        "sum"),
-        "avg_packet_rate":    ("Flow Packets/s",   "mean") if "Flow Packets/s"   in df.columns else ("is_attack", "count"),
-        "avg_byte_rate":      ("Flow Bytes/s",     "mean") if "Flow Bytes/s"     in df.columns else ("is_attack", "count"),
-        "avg_flow_duration":  ("Flow Duration",    "mean") if "Flow Duration"    in df.columns else ("is_attack", "count"),
-        "syn_count":          ("SYN Flag Count",   "sum")  if "SYN Flag Count"   in df.columns else ("is_attack", "count"),
-        "rst_count":          ("RST Flag Count",   "sum")  if "RST Flag Count"   in df.columns else ("is_attack", "count"),
-    }
 
     # Build aggregation dict only for columns that exist
     safe_agg = {}
@@ -172,11 +176,13 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
 
     windows = windows.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-    # ── 9. Forecast on latest window ──────────────────────
+    # ── 9. Forecast all windows in one model call ─────────
     latest = windows.iloc[-1]
-    X_fore = latest[forecast_features].to_frame().T.astype(float)
-    raw_pred = float(forecast_model.predict(X_fore)[0])
-    predicted_attack_count = max(0, int(round(raw_pred)))
+    X_fore = windows[forecast_features].astype(float)
+    forecast_predictions = np.maximum(
+        0, np.rint(forecast_model.predict(X_fore))
+    ).astype(int)
+    predicted_attack_count = int(forecast_predictions[-1])
 
     window_start = latest["parsed_datetime"] + pd.Timedelta(minutes=5)
     window_end   = window_start + pd.Timedelta(minutes=5)
@@ -195,38 +201,20 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
         attack_type=dominant_attack if dominant_attack != "BENIGN" else None,
     ))
 
-    # ── 11. SHAP on most recent attack flow ───────────────
-    explain_result = None
-    try:
-        if not attack_only.empty:
-            shap_row = attack_only.iloc[-1]
-        else:
-            shap_row = df.iloc[-1]
-        shap_feats = {
-            col: float(shap_row[col])
-            for col in detection_features
-            if col in shap_row.index
-        }
-        explain_result = run_explain(ExplainRequest(features=shap_feats))
-    except Exception:
-        explain_result = None
-
-    # ── 12. Chart data ────────────────────────────────────
+    # ── 11. Chart data ────────────────────────────────────
     attack_chart = []
-    for _, row in windows.iterrows():
-        X_w = row[forecast_features].to_frame().T.astype(float)
-        pred_w = max(0, int(round(float(forecast_model.predict(X_w)[0]))))
+    for (_, row), pred_w in zip(windows.iterrows(), forecast_predictions):
         attack_chart.append({
             "time":          str(row["parsed_datetime"]),
             "attack_flows":  int(row["attack_flows"]),
             "normal_flows":  int(row["normal_flows"]),
-            "predicted_next": pred_w,
+            "predicted_next": int(pred_w),
             "attack_ratio":  round(float(row["attack_ratio"]), 4),
         })
 
     recent_windows = attack_chart[-10:]
 
-    # ── 13. Build response ────────────────────────────────
+    # ── 12. Build response ────────────────────────────────
     result = {
         "mode": f"LIVE — {filename}",
         "detection": {
@@ -249,7 +237,7 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
             "risk_level":  risk_result.risk_level,
             "engine":      "Rule-Based Risk Assessment Engine",
         },
-        "explanation": explain_result.model_dump() if explain_result else None,
+        "explanation": None,
         "recent_windows": recent_windows,
         "attack_chart":   attack_chart,
         "summary": {
@@ -262,6 +250,18 @@ def process_csv_bytes(file_bytes: bytes, filename: str) -> dict:
         },
     }
 
-    _live_result     = result
+    if not attack_only.empty:
+        shap_row = attack_only.iloc[-1]
+    else:
+        shap_row = df.iloc[-1]
+    explanation_features = {
+        col: float(shap_row[col])
+        for col in detection_features
+        if col in shap_row.index
+    }
+
+    _live_explanation_features = explanation_features
+    _live_explanation = None
+    _live_result = result
     _live_updated_at = datetime.now().isoformat()
     return result
